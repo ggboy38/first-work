@@ -34,11 +34,8 @@ body[data-mode=signup] .dusk{opacity:1}
   .bg{transform:translate3d(calc(var(--px,0)*-10px),calc(var(--py,0)*-6px),0) scale(1.1)}
 }
 
-/* 花瓣在卡片上方，避免它们持续触发毛玻璃重算 */
-.petals{position:fixed;inset:0;z-index:3;pointer-events:none;overflow:hidden}
-.petal,.bp{position:absolute;width:var(--s,14px);height:calc(var(--s,14px)*.72);background:radial-gradient(circle at 30% 30%,#fff,#ffc4de 45%,#ff8dbd);border-radius:100% 0 100% 0;opacity:.88}
-.petal{top:-30px;animation:fall var(--d) linear var(--dl) infinite}
-@keyframes fall{from{transform:translate3d(0,-6vh,0) rotate(0)}to{transform:translate3d(var(--x),112vh,0) rotate(760deg)}}
+/* 樱花与光尘：单个 canvas，叠在卡片上方 */
+#fx{position:fixed;inset:0;width:100%;height:100%;z-index:3;pointer-events:none}
 
 /* ===== 液态玻璃 ===== */
 .wrap{position:relative;z-index:2;width:min(404px,calc(100vw - 32px))}
@@ -123,13 +120,13 @@ a{color:var(--link);text-decoration:none;font-weight:600}a:hover{text-decoration
   .shade{background:rgba(40,10,70,.22)}
 }
 @media (pointer:coarse){.glint{display:none}.dusk{transition-duration:.35s}}
-@media (prefers-reduced-motion:reduce){.petal,.shake,.spin,.pane,.sw1{animation:none}*{transition:none!important}}
+@media (prefers-reduced-motion:reduce){.shake,.spin,.pane,.sw1{animation:none}*{transition:none!important}}
 </style>
 </head>
 <body data-mode="login">
 <svg width="0" height="0" style="position:absolute" aria-hidden="true"><filter id="lg"><feTurbulence type="fractalNoise" baseFrequency=".011 .015" numOctaves="2" seed="4" result="n"/><feDisplacementMap in="SourceGraphic" in2="n" scale="30" xChannelSelector="R" yChannelSelector="G"/></filter></svg>
 <div class="bg" id="bg" aria-hidden="true"></div><div class="shade"></div><div class="dusk"></div>
-<div class="petals" id="petals" aria-hidden="true"></div>
+<canvas id="fx" aria-hidden="true"></canvas>
 
 <main class="wrap">
   <div class="card" id="card">
@@ -177,18 +174,74 @@ a{color:var(--link);text-decoration:none;font-weight:600}a:hover{text-decoration
 
 <script>
 const $=id=>document.getElementById(id),R=Math.random;
-const card=$('card'),panes=$('panes'),bg=$('bg'),pt=$('petals');
+const card=$('card'),panes=$('panes'),bg=$('bg');
 const fine=matchMedia('(hover:hover) and (pointer:fine)').matches;
 const calm=matchMedia('(prefers-reduced-motion:reduce)').matches;
 
-/* 飘落花瓣：数量按设备减少 */
-for(let i=0;i<(innerWidth<600?8:16);i++){const p=document.createElement('i');p.className='petal';
-  p.style.cssText=`left:${R()*100}%;--s:${9+R()*13}px;--d:${10+R()*9}s;--dl:${-R()*16}s;--x:${(R()-.3)*240}px`;pt.appendChild(p)}
+/* ===== 樱花与光尘：单个 canvas，叠在卡片上方（不会触发毛玻璃重算） ===== */
+const cv=$('fx'),cx=cv.getContext('2d');
+let W=0,H=0,dpr=1,night=0,mx=-999,my=-999,mvx=0,mvy=0,mt=-1e9;
+const petalSprite=(c0,c1,c2)=>{const s=document.createElement('canvas');s.width=64;s.height=48;const g=s.getContext('2d'),
+  gr=g.createLinearGradient(32,48,32,0);gr.addColorStop(0,c0);gr.addColorStop(.6,c1);gr.addColorStop(1,c2);g.fillStyle=gr;
+  g.beginPath();g.moveTo(32,47);g.bezierCurveTo(4,35,0,6,22,1);g.quadraticCurveTo(32,9,42,1);g.bezierCurveTo(64,6,60,35,32,47);g.fill();
+  g.strokeStyle='rgba(255,255,255,.55)';g.lineWidth=1.2;g.beginPath();g.moveTo(32,44);g.lineTo(32,14);g.stroke();return s};
+const SP=[petalSprite('#ff8fbf','#ffc4dc','#fff1f7'),petalSprite('#a98bff','#d3c3ff','#f5f0ff')]; // 粉樱 / 薰衣草紫（夜晚更多）
+const glowSprite=rgb=>{const s=document.createElement('canvas');s.width=s.height=48;const g=s.getContext('2d'),gr=g.createRadialGradient(24,24,0,24,24,24);
+  gr.addColorStop(0,`rgba(${rgb},1)`);gr.addColorStop(.25,`rgba(${rgb},.55)`);gr.addColorStop(1,`rgba(${rgb},0)`);g.fillStyle=gr;g.fillRect(0,0,48,48);return s};
+const GL=[glowSprite('255,236,190'),glowSprite('170,220,255')]; // 暖金光尘 / 夜晚萤火
+const petals=[],bursts=[],motes=[];
+const tone=()=>R()<(night>.5?.7:.12)?1:0;
+const mkPetal=init=>{const z=Math.pow(R(),1.4); // z 越大越近：更大、更快、更不透明
+  return{z,x:R()*W,y:init?R()*H:-40,s:7+z*19,vy:(.45+z*1.1)*(.7+R()*.6),vx:0,dx:R()*6.28,r:R()*6.28,vr:(R()-.5)*.05,f:R()*6.28,vf:.02+R()*.04,k:tone()}};
+const mkBurst=(x,y,vx,vy,s,life)=>({x,y,vx,vy,s,r:R()*6.28,vr:(R()-.5)*.25,f:R()*6.28,vf:.05+R()*.05,k:tone(),life,age:0});
+
+function size(){dpr=Math.min(devicePixelRatio||1,innerWidth<600?1.5:2);W=innerWidth;H=innerHeight;
+  cv.width=Math.round(W*dpr);cv.height=Math.round(H*dpr);if(calm)draw(0,0)}
+function stamp(p,a){ // f 控制花瓣翻转，模拟三维翻滚
+  const sy=.28+.72*Math.abs(Math.cos(p.f)),c=Math.cos(p.r)*dpr,s=Math.sin(p.r)*dpr,w=p.s,h=p.s*.75;
+  cx.globalAlpha=a;cx.setTransform(c,s,-s*sy,c*sy,p.x*dpr,p.y*dpr);cx.drawImage(SP[p.k],-w/2,-h/2,w,h)}
+function draw(dt,t){
+  night+=((document.body.dataset.mode==='signup'?1:0)-night)*.03*dt;
+  mvx*=Math.pow(.9,dt);mvy*=Math.pow(.9,dt);
+  cx.setTransform(1,0,0,1,0,0);cx.globalCompositeOperation='source-over';cx.clearRect(0,0,cv.width,cv.height);
+  // 阵风：持续微风 + 周期性的一阵大风
+  const wind=calm?0:.25+.7*Math.pow(Math.max(0,Math.sin(t/3200)),3)+.18*Math.sin(t/950);
+  const push=fine&&t-mt<400;
+  for(const p of petals){
+    if(dt){
+      p.vx+=(wind*(.6+p.z*.9)-p.vx)*.025*dt;
+      if(push){const dx=p.x-mx,dy=p.y-my,d=Math.hypot(dx,dy);if(d<150&&d>1){const f=1-d/150; // 鼠标划过会吹散花瓣
+        p.vx+=(dx/d*.5+mvx*.015)*f*dt;p.y+=(dy/d*1.2+mvy*.02)*f*dt}}
+      p.x+=(p.vx+Math.sin(p.y/60+p.dx)*.5*(.5+p.z))*dt;p.y+=p.vy*dt;p.r+=(p.vr+p.vx*.01)*dt;p.f+=p.vf*dt;
+      if(p.y>H+40||p.x>W+80||p.x<-120){p.y=-40;p.x=R()*(W+200)-160;p.k=tone()}
+    }
+    stamp(p,.4+.5*p.z)}
+  for(let i=bursts.length-1;i>=0;i--){const p=bursts[i];
+    p.vy+=.06*dt;p.vx*=.985;p.age+=dt;if(p.age>=p.life){bursts.splice(i,1);continue}
+    p.x+=p.vx*dt;p.y+=p.vy*dt;p.r+=p.vr*dt;p.f+=p.vf*dt;stamp(p,.92*(1-p.age/p.life))}
+  // 光尘：登录时是暖金色，切到注册后渐变成蓝色萤火
+  cx.setTransform(dpr,0,0,dpr,0,0);cx.globalCompositeOperation='lighter';
+  for(const m of motes){
+    if(dt){m.ph+=m.sp*dt;m.x+=(m.vx+Math.sin(m.ph)*.12)*dt;m.y+=m.vy*dt;if(m.y<-30){m.y=H+30;m.x=R()*W}}
+    const a=(.3+.7*(.5+.5*Math.sin(m.ph*3)))*.7,sz=m.r*7;
+    if(night<.98){cx.globalAlpha=a*(1-night);cx.drawImage(GL[0],m.x-sz/2,m.y-sz/2,sz,sz)}
+    if(night>.02){cx.globalAlpha=Math.min(1,a*night*1.2);cx.drawImage(GL[1],m.x-sz/2,m.y-sz/2,sz,sz)}}
+  cx.globalCompositeOperation='source-over';cx.globalAlpha=1}
+
+size();addEventListener('resize',size);
+for(let i=0;i<(innerWidth<600?34:84);i++)petals.push(mkPetal(true));
+petals.sort((a,b)=>a.z-b.z);
+for(let i=0;i<(innerWidth<600?14:34);i++)motes.push({x:R()*W,y:R()*H,r:1.5+R()*3.5,vx:(R()-.5)*.15,vy:-(.12+R()*.3),ph:R()*6.28,sp:.008+R()*.02});
+if(calm)draw(0,0);else{let last=0;const frame=t=>{requestAnimationFrame(frame);
+  if(document.hidden){last=t;return}const dt=Math.min(3,(t-last)/16.7)||1;last=t;draw(dt,t)};requestAnimationFrame(frame)}
+if(fine)addEventListener('pointermove',e=>{mx=e.clientX;my=e.clientY;mvx=e.movementX;mvy=e.movementY;mt=performance.now()},{passive:true});
 
 function burst(x,y,n){if(calm)return;n=fine?n:Math.round(n*.6);
-  for(let i=0;i<n;i++){const p=document.createElement('i');p.className='bp';p.style.cssText=`left:${x}px;top:${y}px;--s:${9+R()*13}px`;pt.appendChild(p);
-    const a=R()*6.283,d=80+R()*220;
-    p.animate([{transform:'translate(0,0) rotate(0)',opacity:1},{transform:`translate(${Math.cos(a)*d}px,${Math.sin(a)*d+120}px) rotate(${R()*720}deg)`,opacity:0}],{duration:1200+R()*800,easing:'cubic-bezier(.15,.8,.3,1)'}).onfinish=()=>p.remove()}}
+  for(let i=0;i<n;i++){const a=R()*6.283,v=2+R()*5.5;bursts.push(mkBurst(x,y,Math.cos(a)*v,Math.sin(a)*v-1.5,9+R()*14,70+R()*60))}
+  if(bursts.length>320)bursts.splice(0,bursts.length-320)}
+// 打字时，输入框上方会飘起几片花瓣
+document.addEventListener('input',e=>{const t=e.target;if(!calm&&t.matches&&t.matches('.field input')&&R()<.7){const r=t.getBoundingClientRect();
+  for(let i=0;i<2;i++)bursts.push(mkBurst(r.left+r.width*(.1+R()*.8),r.top+4,(R()-.5)*1.6,-1.6-R()*1.8,9+R()*8,55+R()*35))}});
 
 /* 指针：仅桌面端做高光与视差，并用 rAF 节流 */
 if(fine){let raf=0,ev;addEventListener('pointermove',e=>{ev=e;raf||(raf=requestAnimationFrame(()=>{raf=0;
